@@ -270,7 +270,7 @@ export default function InventoryPredictor() {
           Upload Training Data
         </div>
         <p style={styles.hint}>
-          📋 CSV Format: stock, avgSales, leadTime, reorderStatus
+           CSV Format: stock, avgSales, leadTime, reorderStatus
         </p>
         <input
           type="file"
