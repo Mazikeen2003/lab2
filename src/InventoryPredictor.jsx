@@ -18,6 +18,7 @@ export default function InventoryPredictor() {
   const [accuracy, setAccuracy] = useState(null);
   const [error, setError] = useState(null);
   const [model, setModel] = useState(null);
+  const [normalizationParams, setNormalizationParams] = useState(null);
 
   // Handle training data CSV upload
   const handleTrainingCSVUpload = (event) => {
@@ -44,7 +45,25 @@ export default function InventoryPredictor() {
             return;
           }
 
-          setTrainingData(results.data);
+          // Validate all data are numbers
+          const validData = results.data.filter(row => 
+            !isNaN(parseFloat(row.stock)) &&
+            !isNaN(parseFloat(row.avgSales)) &&
+            !isNaN(parseFloat(row.leadTime)) &&
+            !isNaN(parseFloat(row.reorderStatus))
+          );
+
+          if (validData.length === 0) {
+            setError("⚠️ No valid numeric data found in CSV. Check your values!");
+            return;
+          }
+
+          if (validData.length !== results.data.length) {
+            setError(`⚠️ Skipped ${results.data.length - validData.length} rows with invalid data. Using ${validData.length} valid rows.`);
+          }
+
+          console.log("Valid training samples:", validData.length);
+          setTrainingData(validData);
           setPredictions([]);
           setAccuracy(null);
           setError(null);
@@ -66,11 +85,32 @@ export default function InventoryPredictor() {
       parseFloat(row.leadTime),
     ]);
 
+    // Calculate min and max for normalization
+    const mins = [
+      Math.min(...features.map(f => f[0])),
+      Math.min(...features.map(f => f[1])),
+      Math.min(...features.map(f => f[2])),
+    ];
+    const maxs = [
+      Math.max(...features.map(f => f[0])),
+      Math.max(...features.map(f => f[1])),
+      Math.max(...features.map(f => f[2])),
+    ];
+
+    // Normalize features to 0-1 range
+    const normalizedFeatures = features.map((row) => [
+      (row[0] - mins[0]) / (maxs[0] - mins[0] || 1),
+      (row[1] - mins[1]) / (maxs[1] - mins[1] || 1),
+      (row[2] - mins[2]) / (maxs[2] - mins[2] || 1),
+    ]);
+
     const labels = data.map((row) => [parseFloat(row.reorderStatus)]);
 
     return {
-      inputTensor: tf.tensor2d(features),
+      inputTensor: tf.tensor2d(normalizedFeatures),
       outputTensor: tf.tensor2d(labels),
+      mins,
+      maxs,
     };
   };
 
@@ -85,7 +125,8 @@ export default function InventoryPredictor() {
       setLoading(true);
       setError(null);
 
-      const { inputTensor, outputTensor } = convertToTensors(trainingData);
+      const { inputTensor, outputTensor, mins, maxs } = convertToTensors(trainingData);
+      setNormalizationParams({ mins, maxs });
 
       // Create model
       const newModel = tf.sequential({
@@ -117,9 +158,21 @@ export default function InventoryPredictor() {
       });
 
       // Get final accuracy (safely handle the history object)
+      console.log("Training history:", history);
+      console.log("History data:", history.history);
+      
       if (history.history && history.history.accuracy && history.history.accuracy.length > 0) {
         const finalAccuracy = history.history.accuracy[history.history.accuracy.length - 1];
+        console.log("Final accuracy value:", finalAccuracy);
         setAccuracy((finalAccuracy * 100).toFixed(2));
+      } else {
+        console.warn("Accuracy data not found, trying alternative method");
+        // Fallback: evaluate model on training data
+        const evalResult = newModel.evaluate(inputTensor, outputTensor);
+        const accuracyValue = await evalResult[1].data();
+        const acc = accuracyValue[0];
+        console.log("Fallback accuracy:", acc);
+        setAccuracy((acc * 100).toFixed(2));
       }
 
       // Store model for predictions
@@ -131,7 +184,8 @@ export default function InventoryPredictor() {
 
       setLoading(false);
     } catch (err) {
-      setError("Error training model: " + err.message);
+      console.error("Training error:", err);
+      setError("❌ Error training model: " + err.message);
       setLoading(false);
     }
   };
@@ -171,7 +225,16 @@ export default function InventoryPredictor() {
         }
 
         const [stock, avgSales, leadTime] = parts;
-        const inputTensor = tf.tensor2d([[stock, avgSales, leadTime]]);
+        let normalizedInput = [stock, avgSales, leadTime];
+        if (normalizationParams) {
+          const { mins, maxs } = normalizationParams;
+          normalizedInput = [
+            (stock - mins[0]) / (maxs[0] - mins[0] || 1),
+            (avgSales - mins[1]) / (maxs[1] - mins[1] || 1),
+            (leadTime - mins[2]) / (maxs[2] - mins[2] || 1),
+          ];
+        }
+        const inputTensor = tf.tensor2d([normalizedInput]);
         const result = model.predict(inputTensor);
         const value = (await result.data())[0];
 
@@ -180,7 +243,6 @@ export default function InventoryPredictor() {
           avgSales,
           leadTime,
           prediction: value > 0.5 ? "Reorder" : "No Reorder",
-          confidence: (value * 100).toFixed(2),
         });
 
         inputTensor.dispose();
@@ -196,8 +258,8 @@ export default function InventoryPredictor() {
   return (
     <div style={styles.container}>
       <div style={{ marginBottom: "30px" }}>
-        <h2 style={styles.title}>📊 Inventory Reorder Predictor</h2>
-        <p style={styles.subtitle}>Train an AI model on your data and predict reorder needs instantly</p>
+        <h2 style={styles.title}>Inventory Reorder Predictor</h2>
+        <p style={styles.subtitle}></p>
       </div>
 
       {error && <div style={styles.error}>⚠️ {error}</div>}
@@ -229,7 +291,7 @@ export default function InventoryPredictor() {
           Train Machine Learning Model
         </div>
         <p style={styles.hint}>
-          🤖 Click below to train the neural network on your data (this may take a few seconds)
+          Train Model 
         </p>
         <button 
           onClick={handleTrain} 
@@ -241,7 +303,7 @@ export default function InventoryPredictor() {
           onMouseEnter={(e) => !(!trainingData || loading) && Object.assign(e.target.style, styles.buttonHover)}
           onMouseLeave={(e) => Object.assign(e.target.style, { backgroundColor: "#1976d2", boxShadow: "0 2px 4px rgba(25, 118, 210, 0.3)", transform: "translateY(0)" })}
         >
-          {loading ? "🔄 Training..." : "▶️ Train Model"}
+          {loading ? "🔄 Training..." : "Train"}
         </button>
         {loading && (
           <p style={styles.loading}>
@@ -262,7 +324,7 @@ export default function InventoryPredictor() {
           Make Predictions
         </div>
         <p style={styles.hint}>
-          🔮 Enter items to predict (one per line: stock, avgSales, leadTime)
+         Enter
         </p>
         <textarea
           onChange={handlePredictionsInput}
@@ -291,42 +353,43 @@ export default function InventoryPredictor() {
             <table style={styles.table}>
               <thead>
                 <tr style={styles.tableHeader}>
-                  <th style={styles.tableCell}>Stock</th>
-                  <th style={styles.tableCell}>Avg Sales</th>
-                  <th style={styles.tableCell}>Lead Time</th>
-                  <th style={styles.tableCell}>Prediction</th>
-                  <th style={styles.tableCell}>Confidence</th>
+                  <th style={{ ...styles.tableCell, color: "white", fontWeight: "700" }}>Stock</th>
+                  <th style={{ ...styles.tableCell, color: "white", fontWeight: "700" }}>Avg Sales</th>
+                  <th style={{ ...styles.tableCell, color: "white", fontWeight: "700" }}>Lead Time</th>
+                  <th style={{ ...styles.tableCell, color: "white", fontWeight: "700" }}>Prediction</th>
                 </tr>
               </thead>
               <tbody>
                 {predictions.map((pred, idx) => (
                   <tr
                     key={idx}
-                    style={styles.tableRow}
-                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f5f5f5"}
-                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "#fff"}
+                    style={{
+                      ...styles.tableRow,
+                      backgroundColor: idx % 2 === 0 ? "#ffffff" : "#f9f9f9",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = "#f0f7ff";
+                      e.currentTarget.style.boxShadow = "0 2px 4px rgba(0, 0, 0, 0.05)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = idx % 2 === 0 ? "#ffffff" : "#f9f9f9";
+                      e.currentTarget.style.boxShadow = "none";
+                    }}
                   >
-                    <td style={styles.tableCell}>{pred.stock}</td>
-                    <td style={styles.tableCell}>{pred.avgSales}</td>
-                    <td style={styles.tableCell}>{pred.leadTime}</td>
+                    <td style={styles.tableCell}><strong>{pred.stock}</strong></td>
+                    <td style={styles.tableCell}><strong>{pred.avgSales}</strong></td>
+                    <td style={styles.tableCell}><strong>{pred.leadTime}</strong></td>
                     <td
                       style={{
                         ...styles.tableCell,
                         fontWeight: "bold",
                         color: pred.prediction === "Reorder" ? "#d32f2f" : "#388e3c",
                         fontSize: "15px",
+                        backgroundColor: pred.prediction === "Reorder" ? "#ffebee" : "#e8f5e9",
+                        borderRadius: "6px",
                       }}
                     >
                       {pred.prediction === "Reorder" ? "🔴" : "🟢"} {pred.prediction}
-                    </td>
-                    <td
-                      style={{
-                        ...styles.tableCell,
-                        fontWeight: "600",
-                        color: "#1976d2",
-                      }}
-                    >
-                      {pred.confidence}%
                     </td>
                   </tr>
                 ))}
@@ -478,24 +541,29 @@ const styles = {
     marginTop: "20px",
     overflow: "hidden",
     borderRadius: "8px",
+    border: "1px solid #e0e0e0",
+    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.08)",
   },
   tableHeader: {
     backgroundColor: "#1a237e",
     color: "white",
-    fontWeight: "600",
+    fontWeight: "700",
+    fontSize: "14px",
   },
   tableCell: {
-    padding: "15px 14px",
-    textAlign: "left",
-    borderBottom: "1px solid #e0e0e0",
+    padding: "16px 18px",
+    textAlign: "center",
+    borderBottom: "1px solid #e8e8e8",
     fontSize: "14px",
   },
   tableRow: {
     backgroundColor: "#fff",
-    transition: "background-color 0.2s ease",
+    transition: "all 0.3s ease",
+    borderRadius: "4px",
   },
   tableRowHover: {
-    backgroundColor: "#f5f5f5",
+    backgroundColor: "#f0f7ff",
+    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)",
   },
   stepNumber: {
     display: "inline-flex",
