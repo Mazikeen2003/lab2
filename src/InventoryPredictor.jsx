@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import * as tf from "@tensorflow/tfjs";
-import Papa from "papaparse";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 // Add CSS for spinner animation
 const styleSheet = document.createElement("style");
@@ -15,67 +15,75 @@ export default function InventoryPredictor() {
   const [trainingData, setTrainingData] = useState(null);
   const [predictions, setPredictions] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [trainingLoading, setTrainingLoading] = useState(false);
   const [accuracy, setAccuracy] = useState(null);
   const [error, setError] = useState(null);
   const [model, setModel] = useState(null);
   const [normalizationParams, setNormalizationParams] = useState(null);
+  const [trainingHistory, setTrainingHistory] = useState([]);
+  const [apiDataLoaded, setApiDataLoaded] = useState(false);
 
-  // Handle training data CSV upload
-  const handleTrainingCSVUpload = (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
+  // Fetch training data from backend API
+  useEffect(() => {
+    const fetchTrainingData = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        // Replace with your actual Laravel API endpoint
+        const response = await fetch("http://localhost:8000/api/training-data", {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        });
 
-    setError(null);
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        try {
-          // Validate CSV structure
-          if (
-            results.data.length === 0 ||
-            !results.data[0].stock ||
-            !results.data[0].avgSales ||
-            !results.data[0].leadTime ||
-            results.data[0].reorderStatus === undefined
-          ) {
-            setError(
-              "CSV must contain: stock, avgSales, leadTime, reorderStatus"
-            );
-            return;
-          }
-
-          // Validate all data are numbers
-          const validData = results.data.filter(row => 
-            !isNaN(parseFloat(row.stock)) &&
-            !isNaN(parseFloat(row.avgSales)) &&
-            !isNaN(parseFloat(row.leadTime)) &&
-            !isNaN(parseFloat(row.reorderStatus))
-          );
-
-          if (validData.length === 0) {
-            setError("⚠️ No valid numeric data found in CSV. Check your values!");
-            return;
-          }
-
-          if (validData.length !== results.data.length) {
-            setError(`⚠️ Skipped ${results.data.length - validData.length} rows with invalid data. Using ${validData.length} valid rows.`);
-          }
-
-          console.log("Valid training samples:", validData.length);
-          setTrainingData(validData);
-          setPredictions([]);
-          setAccuracy(null);
-          setError(null);
-        } catch (err) {
-          setError("Error parsing CSV: " + err.message);
+        if (!response.ok) {
+          throw new Error(`API Error: ${response.status} ${response.statusText}`);
         }
-      },
-      error: (err) => {
-        setError("Error reading file: " + err.message);
-      },
-    });
-  };
+
+        const data = await response.json();
+
+        // Validate API response structure
+        if (!Array.isArray(data) && !data.data) {
+          throw new Error("Invalid API response format");
+        }
+
+        const trainingArray = Array.isArray(data) ? data : data.data;
+
+        // Validate data structure
+        if (trainingArray.length === 0) {
+          throw new Error("No training data received from API");
+        }
+
+        const validData = trainingArray.filter(row => 
+          !isNaN(parseFloat(row.stock)) &&
+          !isNaN(parseFloat(row.avgSales)) &&
+          !isNaN(parseFloat(row.leadTime)) &&
+          !isNaN(parseFloat(row.reorderStatus))
+        );
+
+        if (validData.length === 0) {
+          throw new Error("No valid numeric data found in API response");
+        }
+
+        console.log("Valid training samples from API:", validData.length);
+        setTrainingData(validData);
+        setApiDataLoaded(true);
+        setPredictions([]);
+        setAccuracy(null);
+        setTrainingHistory([]);
+      } catch (err) {
+        setError("❌ Error fetching training data from API: " + err.message);
+        console.error("API fetch error:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    // Fetch data on component mount
+    fetchTrainingData();
+  }, []);
 
   // Convert CSV data to TensorFlow tensors
   const convertToTensors = (data) => {
@@ -117,13 +125,14 @@ export default function InventoryPredictor() {
   // Train model
   const handleTrain = async () => {
     if (!trainingData || trainingData.length === 0) {
-      setError("Please upload training data first");
+      setError("Please wait for training data to load from the API");
       return;
     }
 
     try {
-      setLoading(true);
+      setTrainingLoading(true);
       setError(null);
+      setTrainingHistory([]);
 
       const { inputTensor, outputTensor, mins, maxs } = convertToTensors(trainingData);
       setNormalizationParams({ mins, maxs });
@@ -150,11 +159,24 @@ export default function InventoryPredictor() {
         metrics: ["accuracy"],
       });
 
-      // Train model
+      // Train model with callbacks to track loss
       const history = await newModel.fit(inputTensor, outputTensor, {
         epochs: 200,
         shuffle: true,
         verbose: 0,
+        callbacks: {
+          onEpochEnd: (epoch, logs) => {
+            // Update training history for visualization
+            setTrainingHistory(prev => [
+              ...prev,
+              {
+                epoch: epoch + 1,
+                loss: parseFloat(logs.loss.toFixed(4)),
+                accuracy: parseFloat((logs.acc * 100).toFixed(2)),
+              }
+            ]);
+          }
+        }
       });
 
       // Get final accuracy (safely handle the history object)
@@ -182,11 +204,11 @@ export default function InventoryPredictor() {
       inputTensor.dispose();
       outputTensor.dispose();
 
-      setLoading(false);
+      setTrainingLoading(false);
     } catch (err) {
       console.error("Training error:", err);
       setError("❌ Error training model: " + err.message);
-      setLoading(false);
+      setTrainingLoading(false);
     }
   };
 
@@ -259,7 +281,7 @@ export default function InventoryPredictor() {
     <div style={styles.container}>
       <div style={{ marginBottom: "30px" }}>
         <h2 style={styles.title}>Inventory Reorder Predictor</h2>
-        <p style={styles.subtitle}></p>
+        <p style={styles.subtitle}>ML Model with Real-time Training Visualization</p>
       </div>
 
       {error && <div style={styles.error}>⚠️ {error}</div>}
@@ -267,20 +289,20 @@ export default function InventoryPredictor() {
       <div style={styles.section}>
         <div style={styles.sectionTitle}>
           <span style={styles.stepNumber}>1</span>
-          Upload Training Data
+          Load Training Data
         </div>
         <p style={styles.hint}>
-           CSV Format: stock, avgSales, leadTime, reorderStatus
+          Fetching training data from backend API...
         </p>
-        <input
-          type="file"
-          accept=".csv"
-          onChange={handleTrainingCSVUpload}
-          style={styles.fileInput}
-        />
-        {trainingData && (
+        {loading && (
+          <p style={styles.loading}>
+            <span style={styles.spinner}></span>
+            Loading training data from API... 
+          </p>
+        )}
+        {apiDataLoaded && trainingData && (
           <p style={styles.success}>
-            ✅ Successfully loaded {trainingData.length} training samples
+            ✅ Successfully loaded {trainingData.length} training samples from API
           </p>
         )}
       </div>
@@ -291,30 +313,70 @@ export default function InventoryPredictor() {
           Train Machine Learning Model
         </div>
         <p style={styles.hint}>
-          Train Model 
+          Click to train the model and watch the loss decrease as it learns
         </p>
         <button 
           onClick={handleTrain} 
-          disabled={!trainingData || loading}
+          disabled={!trainingData || trainingLoading}
           style={{
             ...styles.button,
-            ...((!trainingData || loading) ? styles.buttonDisabled : {})
+            ...((!trainingData || trainingLoading) ? styles.buttonDisabled : {})
           }}
-          onMouseEnter={(e) => !(!trainingData || loading) && Object.assign(e.target.style, styles.buttonHover)}
+          onMouseEnter={(e) => !(!trainingData || trainingLoading) && Object.assign(e.target.style, styles.buttonHover)}
           onMouseLeave={(e) => Object.assign(e.target.style, { backgroundColor: "#1976d2", boxShadow: "0 2px 4px rgba(25, 118, 210, 0.3)", transform: "translateY(0)" })}
         >
-          {loading ? "🔄 Training..." : "Train"}
+          {trainingLoading ? "🔄 Training..." : "Train Model"}
         </button>
-        {loading && (
+        {trainingLoading && (
           <p style={styles.loading}>
             <span style={styles.spinner}></span>
-            Training in progress... this typically takes 5-10 seconds
+            Training in progress... this typically takes 10-15 seconds
           </p>
         )}
         {accuracy && (
           <p style={styles.success}>
             ✨ Model trained successfully! Accuracy: <strong>{accuracy}%</strong>
           </p>
+        )}
+        
+        {/* Training Loss Visualization */}
+        {trainingHistory.length > 0 && (
+          <div style={{ marginTop: "25px" }}>
+            <h3 style={{ fontSize: "16px", fontWeight: "600", color: "#1a237e", marginBottom: "15px" }}>
+              📈 Training Progress - Loss Over Epochs
+            </h3>
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={trainingHistory} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                <XAxis 
+                  dataKey="epoch" 
+                  stroke="#666"
+                  label={{ value: 'Epoch', position: 'insideBottomRight', offset: -5 }}
+                />
+                <YAxis 
+                  stroke="#666"
+                  label={{ value: 'Loss Value', angle: -90, position: 'insideLeft' }}
+                />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: "#f9f9f9", border: "1px solid #ccc", borderRadius: "4px" }}
+                  formatter={(value) => value.toFixed(4)}
+                />
+                <Legend />
+                <Line 
+                  type="monotone" 
+                  dataKey="loss" 
+                  stroke="#d32f2f" 
+                  dot={false}
+                  strokeWidth={2}
+                  name="Loss"
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+            <p style={{ fontSize: "13px", color: "#666", marginTop: "10px", fontStyle: "italic" }}>
+              💡 The loss line should go down as the model learns. If it stays flat, the model is struggling to learn.
+            </p>
+          </div>
         )}
       </div>
 
@@ -324,7 +386,7 @@ export default function InventoryPredictor() {
           Make Predictions
         </div>
         <p style={styles.hint}>
-         Enter
+          Enter stock levels as: stock, avgSales, leadTime (one per line)
         </p>
         <textarea
           onChange={handlePredictionsInput}
@@ -453,6 +515,7 @@ const styles = {
     borderRadius: "4px",
   },
   fileInput: {
+    display: "none",
     padding: "12px",
     marginTop: "12px",
     cursor: "pointer",
